@@ -10,7 +10,6 @@ import hmac
 import hashlib
 import json
 import time
-import random
 
 # ---------------------- [ إعداد Flask ] ----------------------
 load_dotenv()
@@ -34,10 +33,9 @@ logger = logging.getLogger(__name__)
 CLIENT_ID = os.getenv("SALLA_CLIENT_ID")
 CLIENT_SECRET = os.getenv("SALLA_CLIENT_SECRET")
 WEBHOOK_SECRET = os.getenv("SALLA_WEBHOOK_SECRET")
-DEMO_MODE = os.getenv("DEMO_MODE", "true").lower() == "true"  # وضع العرض
 
 # ---------------------- [ قاعدة البيانات ] ----------------------
-DB_PATH = os.path.join("/tmp", "df_enhanced.db")
+DB_PATH = os.path.join("/tmp", "salla_store.db")
 os.makedirs(os.path.dirname(DB_PATH), exist_ok=True)
 
 def init_db():
@@ -127,56 +125,9 @@ def init_db():
         created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
     )""")
     
-    # إضافة بيانات وهمية للعرض
-    if DEMO_MODE:
-        # إضافة أخطاء وهمية
-        sample_errors = [
-            ("API_ERROR", "Failed to fetch products", "/api/products", "GET", "192.168.1.1", 500),
-            ("AUTH_ERROR", "Invalid token", "/api/orders", "GET", "192.168.1.2", 401),
-            ("VALIDATION_ERROR", "Missing product name", "/api/products", "POST", "192.168.1.3", 400)
-        ]
-        for error in sample_errors:
-            cur.execute("""
-                INSERT OR IGNORE INTO error_logs (error_type, error_message, endpoint, method, ip_address, response_code)
-                VALUES (?, ?, ?, ?, ?, ?)
-            """, error)
-        
-        # إضافة webhooks وهمية
-        sample_webhooks = [
-            ("order.created", json.dumps({"order_id": "12345", "total": 250.50}), True, "185.84.85.86"),
-            ("product.updated", json.dumps({"product_id": "67890", "name": "منتج محدث"}), True, "185.84.85.86"),
-            ("customer.registered", json.dumps({"customer_id": "11111", "email": "customer@example.com"}), True, "185.84.85.86")
-        ]
-        for webhook in sample_webhooks:
-            cur.execute("""
-                INSERT OR IGNORE INTO webhooks_log (event, body, signature_valid, ip_address)
-                VALUES (?, ?, ?, ?)
-            """, webhook)
-        
-        # إضافة مقاييس أداء وهمية
-        endpoints = ["/api/products", "/api/orders", "/api/customers", "/api/status"]
-        for _ in range(20):
-            endpoint = random.choice(endpoints)
-            response_time = random.uniform(50, 500)
-            cur.execute("""
-                INSERT INTO performance_metrics (endpoint, method, response_time_ms)
-                VALUES (?, ?, ?)
-            """, (endpoint, "GET", response_time))
-        
-        # إضافة سجلات API وهمية
-        for _ in range(30):
-            endpoint = random.choice(endpoints)
-            success = random.choice([True, True, True, False])  # 75% success rate
-            response_code = 200 if success else random.choice([400, 401, 404, 500])
-            response_time = random.uniform(20, 300)
-            cur.execute("""
-                INSERT INTO api_logs (endpoint, method, response_code, response_time_ms, ip_address, success)
-                VALUES (?, ?, ?, ?, ?, ?)
-            """, (endpoint, "GET", response_code, response_time, "192.168.1.1", success))
-    
     conn.commit()
     conn.close()
-    logger.info("✅ Database initialized with demo data" if DEMO_MODE else "✅ Database initialized")
+    logger.info("✅ تم تهيئة قاعدة البيانات")
 
 init_db()
 
@@ -218,7 +169,7 @@ def log_api_call(endpoint, method, response_code, response_time, success):
             success
         ))
         
-        # إضافة إلى performance_metrics أيضاً
+        # إضافة إلى performance_metrics
         cur.execute("""
             INSERT INTO performance_metrics (endpoint, method, response_time_ms)
             VALUES (?, ?, ?)
@@ -366,56 +317,10 @@ def get_redirect_uri():
         return f"{proto}://{host}/callback"
     return os.getenv("REDIRECT_URI", "http://localhost:8000/callback")
 
-def get_demo_products():
-    """منتجات وهمية للعرض"""
-    return [
-        {
-            "id": "1001",
-            "name": "لابتوب Dell XPS 15",
-            "price": {"amount": 5999, "currency": "SAR"},
-            "quantity": 15,
-            "status": "available",
-            "image": {"url": "https://via.placeholder.com/150"}
-        },
-        {
-            "id": "1002",
-            "name": "iPhone 15 Pro Max",
-            "price": {"amount": 4899, "currency": "SAR"},
-            "quantity": 8,
-            "status": "available",
-            "image": {"url": "https://via.placeholder.com/150"}
-        },
-        {
-            "id": "1003",
-            "name": "سماعات AirPods Pro",
-            "price": {"amount": 999, "currency": "SAR"},
-            "quantity": 0,
-            "status": "out_of_stock",
-            "image": {"url": "https://via.placeholder.com/150"}
-        },
-        {
-            "id": "1004",
-            "name": "ساعة Apple Watch Ultra",
-            "price": {"amount": 3299, "currency": "SAR"},
-            "quantity": 5,
-            "status": "available",
-            "image": {"url": "https://via.placeholder.com/150"}
-        },
-        {
-            "id": "1005",
-            "name": "كاميرا Canon EOS R5",
-            "price": {"amount": 14999, "currency": "SAR"},
-            "quantity": 3,
-            "status": "available",
-            "image": {"url": "https://via.placeholder.com/150"}
-        }
-    ]
-
 # ---------------------- [ Routes ] ----------------------
 @app.route("/")
 def dashboard():
     """لوحة التحكم الرئيسية"""
-    # Check if enhanced dashboard exists
     template_path = os.path.join(app.template_folder, "dashboard_enhanced.html")
     if os.path.exists(template_path):
         return render_template("dashboard_enhanced.html")
@@ -431,12 +336,12 @@ def login_link():
         state = str(uuid.uuid4())
         save_state(state)
         
-        # إزالة products.write حتى يتم تفعيلها
+        # جميع الصلاحيات المتاحة
         url = (
             "https://accounts.salla.sa/oauth2/auth"
             f"?response_type=code&client_id={CLIENT_ID}"
             f"&redirect_uri={redirect_uri}"
-            f"&scope=offline_access products.read"  # بدون products.write
+            f"&scope=offline_access"
             f"&state={state}"
         )
         
@@ -463,7 +368,6 @@ def callback():
     
     logger.info(f"Callback: code={code}, state={received_state}, error={error}")
     
-    # معالجة الأخطاء
     if error:
         log_error("oauth_error", f"{error}: {error_desc}")
         return render_template_string("""
@@ -477,10 +381,6 @@ def callback():
                     <div class="alert alert-warning">
                         <h4>⚠️ خطأ في المصادقة</h4>
                         <p>{{error_desc}}</p>
-                        <hr>
-                        <p class="mb-0">
-                            <strong>الحل:</strong> يرجى تفعيل الصلاحيات المطلوبة من لوحة تحكم Salla Partners
-                        </p>
                     </div>
                     <a href="/" class="btn btn-primary">العودة للوحة التحكم</a>
                 </div>
@@ -508,7 +408,7 @@ def callback():
         if r.status_code == 200:
             token_data = r.json()
             
-            # Try to get store info
+            # الحصول على معلومات المتجر
             try:
                 headers = {"Authorization": f"Bearer {token_data['access_token']}"}
                 store_r = requests.get("https://api.salla.dev/admin/v2/oauth2/user", headers=headers, timeout=10)
@@ -516,8 +416,9 @@ def callback():
                     store_info = store_r.json().get("data", {})
                     token_data["store_id"] = store_info.get("id")
                     token_data["store_name"] = store_info.get("name")
-            except:
-                pass
+                    logger.info(f"✅ متصل بمتجر: {token_data['store_name']}")
+            except Exception as e:
+                logger.error(f"Failed to get store info: {e}")
             
             save_token(token_data)
             
@@ -531,14 +432,15 @@ def callback():
                     <div class="container mt-5">
                         <div class="alert alert-success">
                             <h2>✅ تم الربط بنجاح</h2>
-                            <p>تم ربط متجرك بنجاح!</p>
+                            <p>تم ربط متجرك: <strong>{{store_name}}</strong></p>
                         </div>
                         <a href="/" class="btn btn-primary">الذهاب للوحة التحكم</a>
                     </div>
                 </body>
                 </html>
-            """)
+            """, store_name=token_data.get('store_name', 'المتجر'))
         else:
+            logger.error(f"Token exchange failed: {r.text}")
             return f"Error: {r.text}", 400
             
     except Exception as e:
@@ -590,26 +492,6 @@ def api_status():
         response_time = (time.time() - start_time) * 1000
         log_api_call("/api/status", "GET", 200, response_time, True)
         
-        # في وضع العرض، أضف بيانات وهمية
-        if DEMO_MODE and not tk:
-            return jsonify({
-                "status": "demo_mode",
-                "client_id_exists": bool(CLIENT_ID),
-                "client_secret_exists": bool(CLIENT_SECRET),
-                "webhook_secret_exists": bool(WEBHOOK_SECRET),
-                "redirect_uri": get_redirect_uri(),
-                "token_exists": False,
-                "token_expired": True,
-                "demo_mode": True,
-                "store_name": "متجر تجريبي",
-                "statistics": {
-                    "errors_today": errors_today + random.randint(0, 5),
-                    "api_calls_today": api_calls_today + random.randint(50, 150),
-                    "avg_response_time_ms": round(avg_response or random.uniform(100, 300), 2),
-                    "security_events_today": security_events
-                }
-            })
-        
         return jsonify({
             "status": "operational",
             "client_id_exists": bool(CLIENT_ID),
@@ -640,50 +522,30 @@ def api_status():
 
 @app.route("/api/products", methods=["GET", "POST"])
 def api_products():
-    """إدارة المنتجات"""
+    """إدارة المنتجات - بيانات حقيقية من المتجر"""
     start_time = time.time()
     
-    # في وضع العرض، أرجع منتجات وهمية
-    if DEMO_MODE:
-        response_time = (time.time() - start_time) * 1000
-        log_api_call("/api/products", request.method, 200, response_time, True)
-        
-        if request.method == "POST":
-            # محاكاة إضافة منتج
-            body = request.json or {}
-            new_product = {
-                "id": str(random.randint(2000, 9999)),
-                "name": body.get("name", "منتج جديد"),
-                "price": {"amount": float(body.get("price", 100)), "currency": "SAR"},
-                "quantity": int(body.get("quantity", 10)),
-                "status": body.get("status", "available"),
-                "image": {"url": body.get("image", "https://via.placeholder.com/150")}
-            }
-            return jsonify({"success": True, "data": new_product}), 201
-        
-        return jsonify({"success": True, "data": get_demo_products()}), 200
-    
-    # الكود الأصلي للاتصال بـ Salla
     tk = get_valid_token()
     if not tk:
-        # في حالة عدم وجود توكن، أرجع منتجات وهمية
-        if DEMO_MODE or not CLIENT_ID:
-            response_time = (time.time() - start_time) * 1000
-            log_api_call("/api/products", request.method, 200, response_time, True)
-            return jsonify({"success": True, "data": get_demo_products(), "demo": True}), 200
-        
         response_time = (time.time() - start_time) * 1000
         log_api_call("/api/products", request.method, 401, response_time, False)
-        return jsonify({"error": "no_valid_token"}), 401
+        return jsonify({"error": "no_valid_token", "message": "يرجى الربط مع المتجر أولاً"}), 401
     
     headers = {"Authorization": f"Bearer {tk['access_token']}"}
     
     try:
         if request.method == "GET":
+            # معاملات البحث والفلترة
             params = {
                 "page": request.args.get("page", 1),
                 "per_page": request.args.get("per_page", 20)
             }
+            
+            # إضافة فلاتر إضافية إن وجدت
+            if request.args.get("status"):
+                params["status"] = request.args.get("status")
+            if request.args.get("sort"):
+                params["sort"] = request.args.get("sort")
             
             r = requests.get(
                 "https://api.salla.dev/admin/v2/products",
@@ -695,18 +557,28 @@ def api_products():
             response_time = (time.time() - start_time) * 1000
             log_api_call("/api/products", "GET", r.status_code, response_time, r.status_code == 200)
             
-            return jsonify(r.json()), r.status_code
+            if r.status_code == 200:
+                logger.info(f"✅ تم جلب المنتجات من المتجر")
+                return jsonify(r.json()), 200
+            else:
+                logger.error(f"❌ فشل جلب المنتجات: {r.status_code}")
+                return jsonify({"error": "api_error", "details": r.text}), r.status_code
         
-        else:  # POST
+        else:  # POST - إضافة منتج جديد
             body = request.json or {}
             
+            # بناء payload للمنتج الجديد
             payload = {
                 "name": body.get("name"),
                 "price": float(body.get("price", 0)),
-                "product_type": body.get("product_type", "physical"),
-                "status": body.get("status", "available")
+                "product_type": body.get("product_type", "product"),
+                "status": body.get("status", "sale"),
+                "quantity": body.get("quantity", "unlimited"),
+                "sku": body.get("sku"),
+                "description": body.get("description", "")
             }
             
+            # إضافة الصور إن وجدت
             if body.get("image"):
                 payload["images"] = [{"original": body["image"]}]
             
@@ -720,37 +592,24 @@ def api_products():
             response_time = (time.time() - start_time) * 1000
             log_api_call("/api/products", "POST", r.status_code, response_time, r.status_code in [200, 201])
             
-            return jsonify(r.json()), r.status_code
+            if r.status_code in [200, 201]:
+                logger.info(f"✅ تم إضافة منتج جديد: {body.get('name')}")
+                return jsonify(r.json()), r.status_code
+            else:
+                logger.error(f"❌ فشل إضافة المنتج: {r.status_code} - {r.text}")
+                return jsonify({"error": "api_error", "details": r.text}), r.status_code
             
     except Exception as e:
         logger.error(f"Products error: {e}")
         log_error("products_error", str(e))
-        
-        # في حالة الخطأ، أرجع منتجات وهمية
-        if DEMO_MODE:
-            response_time = (time.time() - start_time) * 1000
-            log_api_call("/api/products", request.method, 200, response_time, True)
-            return jsonify({"success": True, "data": get_demo_products(), "demo": True}), 200
-        
         response_time = (time.time() - start_time) * 1000
         log_api_call("/api/products", request.method, 500, response_time, False)
         return jsonify({"error": str(e)}), 500
 
-@app.route("/api/products/<pid>", methods=["PUT", "DELETE"])
+@app.route("/api/products/<pid>", methods=["GET", "PUT", "DELETE"])
 def api_products_item(pid):
     """إدارة منتج محدد"""
     start_time = time.time()
-    
-    # في وضع العرض
-    if DEMO_MODE:
-        response_time = (time.time() - start_time) * 1000
-        log_api_call(f"/api/products/{pid}", request.method, 200, response_time, True)
-        
-        if request.method == "DELETE":
-            return jsonify({"success": True, "message": "تم حذف المنتج (محاكاة)"}), 200
-        else:
-            body = request.json or {}
-            return jsonify({"success": True, "message": "تم تحديث المنتج (محاكاة)", "data": body}), 200
     
     tk = get_valid_token()
     if not tk:
@@ -762,20 +621,41 @@ def api_products_item(pid):
     url = f"https://api.salla.dev/admin/v2/products/{pid}"
     
     try:
-        if request.method == "PUT":
+        if request.method == "GET":
+            r = requests.get(url, headers=headers, timeout=10)
+            
+            response_time = (time.time() - start_time) * 1000
+            log_api_call(f"/api/products/{pid}", "GET", r.status_code, response_time, r.status_code == 200)
+            
+            return jsonify(r.json()), r.status_code
+            
+        elif request.method == "PUT":
             body = request.json or {}
             payload = {}
+            
+            # حقول قابلة للتحديث
             if "price" in body:
                 payload["price"] = float(body["price"])
             if "name" in body:
                 payload["name"] = body["name"]
+            if "quantity" in body:
+                payload["quantity"] = body["quantity"]
+            if "description" in body:
+                payload["description"] = body["description"]
+            if "status" in body:
+                payload["status"] = body["status"]
             
             r = requests.put(url, headers=headers, json=payload, timeout=10)
             
             response_time = (time.time() - start_time) * 1000
             log_api_call(f"/api/products/{pid}", "PUT", r.status_code, response_time, r.status_code == 200)
             
-            return jsonify(r.json()), r.status_code
+            if r.status_code == 200:
+                logger.info(f"✅ تم تحديث المنتج: {pid}")
+                return jsonify(r.json()), 200
+            else:
+                logger.error(f"❌ فشل تحديث المنتج: {r.status_code}")
+                return jsonify({"error": "update_failed", "details": r.text}), r.status_code
         
         else:  # DELETE
             r = requests.delete(url, headers=headers, timeout=10)
@@ -783,13 +663,92 @@ def api_products_item(pid):
             response_time = (time.time() - start_time) * 1000
             log_api_call(f"/api/products/{pid}", "DELETE", r.status_code, response_time, r.status_code in [200, 204])
             
-            return jsonify(r.json() if r.text else {"status": "deleted"}), r.status_code
+            if r.status_code in [200, 204]:
+                logger.info(f"✅ تم حذف المنتج: {pid}")
+                return jsonify({"status": "deleted", "product_id": pid}), 200
+            else:
+                logger.error(f"❌ فشل حذف المنتج: {r.status_code}")
+                return jsonify({"error": "delete_failed", "details": r.text}), r.status_code
             
     except Exception as e:
         logger.error(f"Product {pid} error: {e}")
         log_error(f"product_{pid}_error", str(e))
         response_time = (time.time() - start_time) * 1000
         log_api_call(f"/api/products/{pid}", request.method, 500, response_time, False)
+        return jsonify({"error": str(e)}), 500
+
+@app.route("/api/orders")
+def api_orders():
+    """جلب الطلبات من المتجر"""
+    start_time = time.time()
+    
+    tk = get_valid_token()
+    if not tk:
+        response_time = (time.time() - start_time) * 1000
+        log_api_call("/api/orders", "GET", 401, response_time, False)
+        return jsonify({"error": "no_valid_token"}), 401
+    
+    headers = {"Authorization": f"Bearer {tk['access_token']}"}
+    
+    try:
+        params = {
+            "page": request.args.get("page", 1),
+            "per_page": request.args.get("per_page", 20)
+        }
+        
+        r = requests.get(
+            "https://api.salla.dev/admin/v2/orders",
+            headers=headers,
+            params=params,
+            timeout=15
+        )
+        
+        response_time = (time.time() - start_time) * 1000
+        log_api_call("/api/orders", "GET", r.status_code, response_time, r.status_code == 200)
+        
+        return jsonify(r.json()), r.status_code
+        
+    except Exception as e:
+        logger.error(f"Orders error: {e}")
+        response_time = (time.time() - start_time) * 1000
+        log_api_call("/api/orders", "GET", 500, response_time, False)
+        return jsonify({"error": str(e)}), 500
+
+@app.route("/api/customers")
+def api_customers():
+    """جلب العملاء من المتجر"""
+    start_time = time.time()
+    
+    tk = get_valid_token()
+    if not tk:
+        response_time = (time.time() - start_time) * 1000
+        log_api_call("/api/customers", "GET", 401, response_time, False)
+        return jsonify({"error": "no_valid_token"}), 401
+    
+    headers = {"Authorization": f"Bearer {tk['access_token']}"}
+    
+    try:
+        params = {
+            "page": request.args.get("page", 1),
+            "per_page": request.args.get("per_page", 20)
+        }
+        
+        r = requests.get(
+            "https://api.salla.dev/admin/v2/customers",
+            headers=headers,
+            params=params,
+            timeout=15
+        )
+        
+        response_time = (time.time() - start_time) * 1000
+        log_api_call("/api/customers", "GET", r.status_code, response_time, r.status_code == 200)
+        
+        return jsonify(r.json()), r.status_code
+        
+    except Exception as e:
+        logger.error(f"Customers error: {e}")
+        response_time = (time.time() - start_time) * 1000
+        log_api_call("/api/customers", "GET", 500, response_time, False)
         return jsonify({"error": str(e)}), 500
 
 @app.route("/api/errors")
@@ -881,16 +840,6 @@ def api_metrics():
         
         conn.close()
         
-        # إضافة بيانات وهمية إذا لم توجد بيانات
-        if not performance and DEMO_MODE:
-            performance = [
-                {"endpoint": "/api/products", "count": 45, "avg_time": 156.32, "min_time": 89.5, "max_time": 412.8},
-                {"endpoint": "/api/status", "count": 120, "avg_time": 45.67, "min_time": 12.3, "max_time": 98.4},
-                {"endpoint": "/api/orders", "count": 28, "avg_time": 234.12, "min_time": 145.2, "max_time": 567.9}
-            ]
-            success_rate = 94.5
-            total_calls = 193
-        
         return jsonify({
             "period": period,
             "performance": performance,
@@ -955,7 +904,26 @@ def webhook():
         
         if not WEBHOOK_SECRET:
             logger.warning("WEBHOOK_SECRET not configured")
-            return jsonify({"error": "webhook_not_configured"}), 500
+            # حفظ الـ webhook بدون التحقق من التوقيع للاختبار
+            payload = request.json or {}
+            event = payload.get("event", "unknown")
+            
+            conn = sqlite3.connect(DB_PATH)
+            cur = conn.cursor()
+            cur.execute("""
+                INSERT INTO webhooks_log (event, body, signature_valid, ip_address)
+                VALUES (?, ?, ?, ?)
+            """, (
+                event,
+                json.dumps(payload, ensure_ascii=False),
+                False,
+                request.remote_addr
+            ))
+            conn.commit()
+            conn.close()
+            
+            logger.info(f"📩 Webhook received (no verification): {event}")
+            return jsonify({"status": "ok", "warning": "no_webhook_secret"}), 200
         
         expected = hmac.new(
             WEBHOOK_SECRET.encode("utf-8"),
@@ -987,7 +955,15 @@ def webhook():
         conn.commit()
         conn.close()
         
-        logger.info(f"Webhook received: {event}")
+        logger.info(f"📩 Webhook received: {event}")
+        
+        # معالجة أحداث محددة
+        if event == "order.created":
+            logger.info(f"🛒 طلب جديد: {payload.get('data', {}).get('id')}")
+        elif event == "product.created":
+            logger.info(f"📦 منتج جديد: {payload.get('data', {}).get('name')}")
+        elif event == "customer.created":
+            logger.info(f"👤 عميل جديد: {payload.get('data', {}).get('email')}")
         
         return jsonify({"status": "ok"}), 200
         
@@ -1005,10 +981,14 @@ def health():
         cur.execute("SELECT 1")
         conn.close()
         
+        # Check token
+        tk = get_latest_token()
+        
         return jsonify({
             "status": "healthy",
             "database": "connected",
-            "demo_mode": DEMO_MODE
+            "token_status": "active" if tk and not is_token_expired(tk) else "expired",
+            "store_connected": tk.get("store_name") if tk else None
         }), 200
         
     except Exception as e:
@@ -1029,8 +1009,8 @@ def internal_error(e):
 
 # ---------------------- [ تشغيل ] ----------------------
 if __name__ == "__main__":
-    logger.info("🚀 Starting Salla Dashboard App")
-    logger.info(f"📊 Demo Mode: {'ON' if DEMO_MODE else 'OFF'}")
+    logger.info("🚀 Starting Salla Store Integration")
+    logger.info("📦 Real Store Mode - No Demo Data")
     app.run(
         host="0.0.0.0",
         port=int(os.environ.get("PORT", 8000)),
