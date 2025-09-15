@@ -5,9 +5,6 @@ import sqlite3
 import uuid
 from flask import Flask, request, jsonify, redirect, render_template_string
 from dotenv import load_dotenv
-import hmac
-import hashlib
-import json
 from datetime import datetime, timedelta
 
 # ---------------------- [ إعداد Flask ] ----------------------
@@ -34,7 +31,6 @@ CLIENT_SECRET = os.getenv("SALLA_CLIENT_SECRET")
 WEBHOOK_SECRET = os.getenv("SALLA_WEBHOOK_SECRET")
 
 # ---------------------- [ قاعدة البيانات ] ----------------------
-# ✅ تعديل: نخزن قاعدة البيانات في /tmp عشان تشتغل على Render
 DB_PATH = os.path.join("/tmp", "df.db")
 os.makedirs(os.path.dirname(DB_PATH), exist_ok=True)
 
@@ -64,7 +60,6 @@ def init_db():
 init_db()
 
 # ---------------------- [ دوال مساعدة ] ----------------------
-
 def save_state(state_value: str):
     conn = sqlite3.connect(DB_PATH)
     cur = conn.cursor()
@@ -130,7 +125,9 @@ def refresh_access_token():
     if response.status_code == 200:
         new_tokens = response.json()
         save_token(new_tokens)
+        logger.info("🔄 Token refreshed بنجاح")
         return new_tokens
+    logger.error("⚠️ فشل تحديث التوكن: %s", response.text)
     return None
 
 
@@ -158,7 +155,6 @@ def get_redirect_uri():
     return os.getenv("REDIRECT_URI", "http://localhost:8000/callback")
 
 # ---------------------- [ Routes ] ----------------------
-
 @app.route("/")
 def home():
     redirect_uri = get_redirect_uri()
@@ -172,21 +168,28 @@ def home():
         f"&scope=offline_access products.read products.read_write"
         f"&state={state}"
     )
+    logger.info("🏠 Home page opened. Redirect URI: %s", redirect_uri)
     return f"""
     <h1>Salla Dashboard</h1>
     <a href="{auth_url}">Login with Salla</a><br>
     <a href="/products">إدارة المنتجات</a><br>
-    <a href="/token">عرض التوكن</a>
+    <a href="/token">عرض التوكن</a><br>
+    <a href="/debug">Debug Info</a>
     """
+
 
 @app.route("/callback")
 def callback():
     code = request.args.get("code")
     received_state = request.args.get("state")
     saved_state = get_last_state()
+    logger.info("↩️ Callback received. code=%s state=%s", code, received_state)
+
     if not received_state or received_state != saved_state:
+        logger.error("❌ Invalid or missing state")
         return "Error: Invalid or missing state"
     if not code:
+        logger.error("❌ No code received")
         return "Error: No code received"
 
     redirect_uri = get_redirect_uri()
@@ -202,19 +205,60 @@ def callback():
     if response.status_code == 200:
         token_data = response.json()
         save_token(token_data)
+        logger.info("✅ Access token saved بنجاح")
         return "<h2>Success!</h2><a href='/products'>اذهب للمنتجات</a>"
+    logger.error("⚠️ Error fetching token: %s", response.text)
     return f"Error: {response.text}"
+
 
 @app.route("/token")
 def token():
     token_data = get_valid_token()
+    logger.info("🔑 Token checked: %s", "Available" if token_data else "Not available")
     return jsonify(token_data if token_data else {"error": "No token"})
 
-# ---------------------- [ إدارة المنتجات ] ----------------------
-# (نفس الكود حق المنتجات اللي عندك بدون تغيير)
+
+@app.route("/products")
+def products():
+    logger.info("📦 طلب صفحة المنتجات")
+    token_data = get_valid_token()
+    if not token_data:
+        logger.error("❌ No valid token موجود")
+        return "<h2>Error: No valid token available</h2>"
+
+    access_token = token_data["access_token"]
+    url = "https://api.salla.dev/admin/v2/products"
+    headers = {"Authorization": f"Bearer {access_token}"}
+    logger.info("➡️ جلب المنتجات من %s", url)
+    response = requests.get(url, headers=headers)
+
+    if response.status_code != 200:
+        logger.error("⚠️ Error fetching products: %s", response.text)
+        return f"<h2>Error fetching products:</h2><pre>{response.text}</pre>"
+
+    products = response.json().get("data", [])
+    logger.info("✅ عدد المنتجات: %d", len(products))
+
+    html = "<h1>🛒 المنتجات</h1><ul>"
+    for p in products:
+        html += f"<li>{p.get('name', 'بدون اسم')} - {p.get('price', {}).get('amount', 0)} ريال</li>"
+    html += "</ul>"
+    return render_template_string(html)
+
+
+@app.route("/debug")
+def debug():
+    token_data = get_latest_token()
+    redirect_uri = get_redirect_uri()
+    logger.info("🔍 Debug endpoint checked")
+    return jsonify({
+        "client_id": CLIENT_ID,
+        "client_secret_exists": bool(CLIENT_SECRET),
+        "redirect_uri": redirect_uri,
+        "latest_token": token_data if token_data else "No token stored"
+    })
 
 # ----------------------
-
 if __name__ == "__main__":
     app.run(
         host="0.0.0.0",
