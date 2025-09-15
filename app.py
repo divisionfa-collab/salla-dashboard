@@ -3,7 +3,7 @@ import requests
 import logging
 import sqlite3
 import uuid
-from flask import Flask, request, jsonify, redirect, render_template_string
+from flask import Flask, request, jsonify, render_template, render_template_string
 from dotenv import load_dotenv
 from datetime import datetime, timedelta
 import hmac
@@ -12,7 +12,7 @@ import json
 
 # ---------------------- [ إعداد Flask ] ----------------------
 load_dotenv()
-app = Flask(__name__)
+app = Flask(__name__, static_folder="static", template_folder="templates")
 
 # ---------------------- [ Logging ] ----------------------
 LOG_DIR = "logs"
@@ -21,10 +21,8 @@ os.makedirs(LOG_DIR, exist_ok=True)
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s [%(levelname)s] %(message)s",
-    handlers=[
-        logging.FileHandler(os.path.join(LOG_DIR, "app.log")),
-        logging.StreamHandler()
-    ]
+    handlers=[logging.FileHandler(os.path.join(LOG_DIR, "app.log")),
+              logging.StreamHandler()]
 )
 logger = logging.getLogger(__name__)
 
@@ -55,16 +53,23 @@ def init_db():
         expires_in INTEGER,
         created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
     )""")
+    cur.execute("""
+    CREATE TABLE IF NOT EXISTS webhooks_log (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        event TEXT,
+        body TEXT,
+        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+    )""")
     conn.commit()
     conn.close()
 
 init_db()
 
 # ---------------------- [ دوال مساعدة ] ----------------------
-def save_state(state_value: str):
+def save_state(value: str):
     conn = sqlite3.connect(DB_PATH)
     cur = conn.cursor()
-    cur.execute("INSERT INTO oauth_state (value) VALUES (?)", (state_value,))
+    cur.execute("INSERT INTO oauth_state (value) VALUES (?)", (value,))
     conn.commit()
     conn.close()
 
@@ -94,200 +99,202 @@ def save_token(token_data: dict):
 def get_latest_token():
     conn = sqlite3.connect(DB_PATH)
     cur = conn.cursor()
-    cur.execute("SELECT access_token, refresh_token, scope, expires_in, created_at FROM tokens ORDER BY id DESC LIMIT 1")
+    cur.execute("""
+      SELECT access_token, refresh_token, scope, expires_in, created_at
+      FROM tokens ORDER BY id DESC LIMIT 1
+    """)
     row = cur.fetchone()
     conn.close()
     if row:
-        return {
-            "access_token": row[0],
-            "refresh_token": row[1],
-            "scope": row[2],
-            "expires_in": row[3],
-            "created_at": row[4]
-        }
+        return {"access_token": row[0], "refresh_token": row[1],
+                "scope": row[2], "expires_in": row[3], "created_at": row[4]}
     return None
 
 def refresh_access_token():
-    token_data = get_latest_token()
-    if not token_data or not token_data.get("refresh_token"):
+    tk = get_latest_token()
+    if not tk or not tk.get("refresh_token"):
         return None
-    refresh_token = token_data["refresh_token"]
     data = {
         "grant_type": "refresh_token",
         "client_id": CLIENT_ID,
         "client_secret": CLIENT_SECRET,
-        "refresh_token": refresh_token
+        "refresh_token": tk["refresh_token"]
     }
-    response = requests.post("https://accounts.salla.sa/oauth2/token", data=data)
-    if response.status_code == 200:
-        new_tokens = response.json()
-        save_token(new_tokens)
-        logger.info("🔄 Token refreshed بنجاح")
-        return new_tokens
-    logger.error("⚠️ فشل تحديث التوكن: %s", response.text)
+    r = requests.post("https://accounts.salla.sa/oauth2/token", data=data)
+    if r.status_code == 200:
+        new_t = r.json()
+        save_token(new_t)
+        logger.info("🔄 تم تحديث التوكن")
+        return new_t
+    logger.error("فشل تحديث التوكن: %s", r.text)
     return None
 
-def is_token_expired(token_data):
-    if not token_data:
-        return True
-    created_at = datetime.strptime(token_data["created_at"], "%Y-%m-%d %H:%M:%S")
-    expires_in = token_data["expires_in"]
-    expiry_time = created_at + timedelta(seconds=expires_in)
+def is_token_expired(token):
+    if not token: return True
+    created_at = datetime.strptime(token["created_at"], "%Y-%m-%d %H:%M:%S")
+    expiry_time = created_at + timedelta(seconds=token["expires_in"])
     return datetime.now() >= expiry_time
 
 def get_valid_token():
-    token_data = get_latest_token()
-    if not token_data or is_token_expired(token_data):
+    tk = get_latest_token()
+    if not tk or is_token_expired(tk):
         return refresh_access_token()
-    return token_data
+    return tk
 
 def get_redirect_uri():
     if request.headers.get("X-Forwarded-Host"):
-        protocol = request.headers.get("X-Forwarded-Proto", "https")
+        proto = request.headers.get("X-Forwarded-Proto", "https")
         host = request.headers.get("X-Forwarded-Host")
-        return f"{protocol}://{host}/callback"
+        return f"{proto}://{host}/callback"
     return os.getenv("REDIRECT_URI", "http://localhost:8000/callback")
 
-# ---------------------- [ Routes ] ----------------------
+# ---------------------- [ صفحات الواجهة ] ----------------------
 @app.route("/")
-def home():
+def dashboard():
+    """لوحة التحكم الرئيسية"""
+    return render_template("dashboard.html")
+
+# رابط تسجيل الدخول
+@app.route("/login-link")
+def login_link():
     redirect_uri = get_redirect_uri()
     state = str(uuid.uuid4())
     save_state(state)
-    auth_url = (
-        f"https://accounts.salla.sa/oauth2/auth"
-        f"?response_type=code"
-        f"&client_id={CLIENT_ID}"
+    url = (
+        "https://accounts.salla.sa/oauth2/auth"
+        f"?response_type=code&client_id={CLIENT_ID}"
         f"&redirect_uri={redirect_uri}"
         f"&scope=offline_access products.read products.read_write"
         f"&state={state}"
     )
-    logger.info("🏠 Home page opened. Redirect URI: %s", redirect_uri)
-    return f"""
-    <h1>Salla Dashboard</h1>
-    <a href="{auth_url}">Login with Salla</a><br>
-    <a href="/products">إدارة المنتجات</a><br>
-    <a href="/token">عرض التوكن</a><br>
-    <a href="/debug">Debug Info</a><br>
-    <a href="/webhook-test">Webhook Test</a>
-    """
+    return jsonify({"auth_url": url})
 
+# بعد التفويض
 @app.route("/callback")
 def callback():
     code = request.args.get("code")
     received_state = request.args.get("state")
     saved_state = get_last_state()
-    logger.info("↩️ Callback received. code=%s state=%s", code, received_state)
+    logger.info("↩️ Callback: code=%s state=%s", code, received_state)
 
     if not received_state or received_state != saved_state:
-        logger.error("❌ Invalid or missing state")
         return "Error: Invalid or missing state"
     if not code:
-        logger.error("❌ No code received")
         return "Error: No code received"
 
-    redirect_uri = get_redirect_uri()
-    token_url = "https://accounts.salla.sa/oauth2/token"
     data = {
         "grant_type": "authorization_code",
         "client_id": CLIENT_ID,
         "client_secret": CLIENT_SECRET,
-        "redirect_uri": redirect_uri,
+        "redirect_uri": get_redirect_uri(),
         "code": code
     }
-    response = requests.post(token_url, data=data)
-    if response.status_code == 200:
-        token_data = response.json()
-        save_token(token_data)
-        logger.info("✅ Access token saved بنجاح")
-        return "<h2>Success!</h2><a href='/products'>اذهب للمنتجات</a>"
-    logger.error("⚠️ Error fetching token: %s", response.text)
-    return f"Error: {response.text}"
+    r = requests.post("https://accounts.salla.sa/oauth2/token", data=data)
+    if r.status_code == 200:
+        save_token(r.json())
+        return render_template_string(
+            "<h2>✅ تم الربط بنجاح</h2><a href='/'>الرجوع للوحة التحكم</a>"
+        )
+    return f"Error: {r.text}"
 
-@app.route("/token")
-def token():
-    token_data = get_valid_token()
-    logger.info("🔑 Token checked: %s", "Available" if token_data else "Not available")
-    return jsonify(token_data if token_data else {"error": "No token"})
+# ---------------------- [ API للواجهة ] ----------------------
+@app.route("/api/status")
+def api_status():
+    tk = get_latest_token()
+    return jsonify({
+        "client_id_exists": bool(CLIENT_ID),
+        "client_secret_exists": bool(CLIENT_SECRET),
+        "redirect_uri": get_redirect_uri(),
+        "token_exists": bool(tk),
+        "token_expired": is_token_expired(tk) if tk else True,
+        "token_created_at": tk["created_at"] if tk else None,
+        "scope": tk["scope"] if tk else None
+    })
 
-@app.route("/products")
-def products():
-    logger.info("📦 طلب صفحة المنتجات")
-    token_data = get_valid_token()
-    if not token_data:
-        logger.error("❌ No valid token موجود")
-        return "<h2>Error: No valid token available</h2>"
+@app.route("/api/products", methods=["GET", "POST"])
+def api_products():
+    tk = get_valid_token()
+    if not tk:
+        return jsonify({"error": "no_valid_token"}), 401
 
-    access_token = token_data["access_token"]
-    url = "https://api.salla.dev/admin/v2/products"
-    headers = {"Authorization": f"Bearer {access_token}"}
-    response = requests.get(url, headers=headers)
+    headers = {"Authorization": f"Bearer {tk['access_token']}"}
 
-    if response.status_code != 200:
-        logger.error("⚠️ Error fetching products: %s", response.text)
-        return f"<h2>Error fetching products:</h2><pre>{response.text}</pre>"
+    if request.method == "GET":
+        r = requests.get("https://api.salla.dev/admin/v2/products", headers=headers)
+        return (jsonify(r.json()), r.status_code)
 
-    products = response.json().get("data", [])
-    logger.info("✅ عدد المنتجات: %d", len(products))
+    # POST: إضافة منتج
+    body = request.json or {}
+    payload = {
+        "name": body.get("name"),
+        "price": float(body.get("price", 0)),
+        "image": {"url": body.get("image")},
+        "product_type": "physical",
+        "status": int(body.get("status", 1)),
+        "categories": [body.get("category_id")] if body.get("category_id") else []
+    }
+    r = requests.post("https://api.salla.dev/admin/v2/products", headers=headers, json=payload)
+    return (jsonify(r.json()), r.status_code)
 
-    html = "<h1>🛒 المنتجات</h1><ul>"
-    for p in products:
-        html += f"<li>{p.get('name', 'بدون اسم')} - {p.get('price', {}).get('amount', 0)} ريال</li>"
-    html += "</ul>"
-    return render_template_string(html)
+@app.route("/api/products/<pid>", methods=["PUT", "DELETE"])
+def api_products_item(pid):
+    tk = get_valid_token()
+    if not tk:
+        return jsonify({"error": "no_valid_token"}), 401
 
+    headers = {"Authorization": f"Bearer {tk['access_token']}"}
+    url = f"https://api.salla.dev/admin/v2/products/{pid}"
+
+    if request.method == "PUT":
+        body = request.json or {}
+        payload = {}
+        if "price" in body: payload["price"] = float(body["price"])
+        if "name" in body: payload["name"] = body["name"]
+        r = requests.put(url, headers=headers, json=payload)
+        return (jsonify(r.json()), r.status_code)
+
+    # DELETE
+    r = requests.delete(url, headers=headers)
+    return (jsonify(r.json() if r.text else {"status": "deleted"}), r.status_code)
+
+# ---------------------- [ Webhook ] ----------------------
 @app.route("/webhook", methods=["POST"])
 def webhook():
     try:
-        raw_body = request.get_data()
-        signature = request.headers.get("X-Salla-Signature")
+        raw = request.get_data()
+        sig = request.headers.get("X-Salla-Signature")
+        if not sig:
+            return jsonify({"error": "missing_signature"}), 400
 
-        if not signature:
-            logger.warning("❌ Webhook بدون توقيع")
-            return jsonify({"error": "Missing signature"}), 400
+        expected = hmac.new(WEBHOOK_SECRET.encode("utf-8"), raw, hashlib.sha256).hexdigest()
+        if not hmac.compare_digest(expected, sig):
+            return jsonify({"error": "invalid_signature"}), 403
 
-        expected_signature = hmac.new(
-            WEBHOOK_SECRET.encode("utf-8"),
-            raw_body,
-            hashlib.sha256
-        ).hexdigest()
+        payload = request.json or {}
+        event = payload.get("event", "unknown")
 
-        if not hmac.compare_digest(expected_signature, signature):
-            logger.warning("⚠️ توقيع غير صالح للويب هوك")
-            return jsonify({"error": "Invalid signature"}), 403
+        # نسجل الحدث في DB
+        conn = sqlite3.connect(DB_PATH); cur = conn.cursor()
+        cur.execute("INSERT INTO webhooks_log (event, body) VALUES (?, ?)",
+                    (event, json.dumps(payload, ensure_ascii=False)))
+        conn.commit(); conn.close()
 
-        payload = request.json
-        event_type = payload.get("event", "unknown")
-
-        logger.info(f"📩 Webhook مستلم: {event_type}")
-        logger.debug(f"Payload: {json.dumps(payload, ensure_ascii=False)}")
-
-        return jsonify({"status": "success"}), 200
-
+        logger.info("📩 Webhook: %s", event)
+        return jsonify({"status": "ok"}), 200
     except Exception as e:
-        logger.error(f"❌ خطأ في معالجة Webhook: {str(e)}")
-        return jsonify({"error": "Internal Server Error"}), 500
+        logger.exception("webhook error")
+        return jsonify({"error": "internal_error"}), 500
 
-@app.route("/debug")
-def debug():
-    token_data = get_latest_token()
-    redirect_uri = get_redirect_uri()
-    logger.info("🔍 Debug endpoint checked")
-    return jsonify({
-        "client_id": CLIENT_ID,
-        "client_secret_exists": bool(CLIENT_SECRET),
-        "redirect_uri": redirect_uri,
-        "latest_token": token_data if token_data else "No token stored"
-    })
+@app.route("/api/webhooks-log")
+def api_webhooks_log():
+    conn = sqlite3.connect(DB_PATH)
+    cur = conn.cursor()
+    cur.execute("SELECT id, event, body, created_at FROM webhooks_log ORDER BY id DESC LIMIT 50")
+    rows = cur.fetchall()
+    conn.close()
+    items = [{"id": r[0], "event": r[1], "body": json.loads(r[2]), "created_at": r[3]} for r in rows]
+    return jsonify(items)
 
-@app.route("/webhook-test")
-def webhook_test():
-    return "<h2>🚀 Webhook Test Route جاهز</h2>"
-
-# ----------------------
+# ---------------------- [ تشغيل ] ----------------------
 if __name__ == "__main__":
-    app.run(
-        host="0.0.0.0",
-        port=int(os.environ.get("PORT", 8000)),
-        debug=False
-    )
+    app.run(host="0.0.0.0", port=int(os.environ.get("PORT", 8000)), debug=False)
