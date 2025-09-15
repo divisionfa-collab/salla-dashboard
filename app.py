@@ -321,6 +321,8 @@ def dashboard():
         return render_template("dashboard_enhanced.html")
     return render_template("dashboard.html")
 
+# في ملف app.py، ابحث عن دالة login_link واستبدلها بهذه:
+
 @app.route("/login-link")
 def login_link():
     """إنشاء رابط تسجيل الدخول"""
@@ -331,11 +333,13 @@ def login_link():
         state = str(uuid.uuid4())
         save_state(state)
         
+        # استخدم فقط الصلاحيات المتاحة لتطبيقك
+        # قم بإزالة products.write إذا لم تكن مفعلة
         url = (
             "https://accounts.salla.sa/oauth2/auth"
             f"?response_type=code&client_id={CLIENT_ID}"
             f"&redirect_uri={redirect_uri}"
-            f"&scope=offline_access products.read products.write"
+            f"&scope=offline_access products.read"  # إزالة products.write
             f"&state={state}"
         )
         
