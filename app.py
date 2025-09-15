@@ -6,6 +6,9 @@ import uuid
 from flask import Flask, request, jsonify, redirect, render_template_string
 from dotenv import load_dotenv
 from datetime import datetime, timedelta
+import hmac
+import hashlib
+import json
 
 # ---------------------- [ إعداد Flask ] ----------------------
 load_dotenv()
@@ -13,7 +16,7 @@ app = Flask(__name__)
 
 # ---------------------- [ Logging ] ----------------------
 LOG_DIR = "logs"
-os.makedirs(LOG_DIR, exist_ok=True)  # ✅ إنشاء مجلد اللوج إذا ما كان موجود
+os.makedirs(LOG_DIR, exist_ok=True)
 
 logging.basicConfig(
     level=logging.INFO,
@@ -33,7 +36,6 @@ WEBHOOK_SECRET = os.getenv("SALLA_WEBHOOK_SECRET")
 # ---------------------- [ قاعدة البيانات ] ----------------------
 DB_PATH = os.path.join("/tmp", "df.db")
 os.makedirs(os.path.dirname(DB_PATH), exist_ok=True)
-
 
 def init_db():
     conn = sqlite3.connect(DB_PATH)
@@ -56,7 +58,6 @@ def init_db():
     conn.commit()
     conn.close()
 
-
 init_db()
 
 # ---------------------- [ دوال مساعدة ] ----------------------
@@ -67,7 +68,6 @@ def save_state(state_value: str):
     conn.commit()
     conn.close()
 
-
 def get_last_state():
     conn = sqlite3.connect(DB_PATH)
     cur = conn.cursor()
@@ -75,7 +75,6 @@ def get_last_state():
     row = cur.fetchone()
     conn.close()
     return row[0] if row else None
-
 
 def save_token(token_data: dict):
     conn = sqlite3.connect(DB_PATH)
@@ -92,7 +91,6 @@ def save_token(token_data: dict):
     conn.commit()
     conn.close()
 
-
 def get_latest_token():
     conn = sqlite3.connect(DB_PATH)
     cur = conn.cursor()
@@ -108,7 +106,6 @@ def get_latest_token():
             "created_at": row[4]
         }
     return None
-
 
 def refresh_access_token():
     token_data = get_latest_token()
@@ -130,7 +127,6 @@ def refresh_access_token():
     logger.error("⚠️ فشل تحديث التوكن: %s", response.text)
     return None
 
-
 def is_token_expired(token_data):
     if not token_data:
         return True
@@ -139,13 +135,11 @@ def is_token_expired(token_data):
     expiry_time = created_at + timedelta(seconds=expires_in)
     return datetime.now() >= expiry_time
 
-
 def get_valid_token():
     token_data = get_latest_token()
     if not token_data or is_token_expired(token_data):
         return refresh_access_token()
     return token_data
-
 
 def get_redirect_uri():
     if request.headers.get("X-Forwarded-Host"):
@@ -174,9 +168,9 @@ def home():
     <a href="{auth_url}">Login with Salla</a><br>
     <a href="/products">إدارة المنتجات</a><br>
     <a href="/token">عرض التوكن</a><br>
-    <a href="/debug">Debug Info</a>
+    <a href="/debug">Debug Info</a><br>
+    <a href="/webhook-test">Webhook Test</a>
     """
-
 
 @app.route("/callback")
 def callback():
@@ -210,13 +204,11 @@ def callback():
     logger.error("⚠️ Error fetching token: %s", response.text)
     return f"Error: {response.text}"
 
-
 @app.route("/token")
 def token():
     token_data = get_valid_token()
     logger.info("🔑 Token checked: %s", "Available" if token_data else "Not available")
     return jsonify(token_data if token_data else {"error": "No token"})
-
 
 @app.route("/products")
 def products():
@@ -229,7 +221,6 @@ def products():
     access_token = token_data["access_token"]
     url = "https://api.salla.dev/admin/v2/products"
     headers = {"Authorization": f"Bearer {access_token}"}
-    logger.info("➡️ جلب المنتجات من %s", url)
     response = requests.get(url, headers=headers)
 
     if response.status_code != 200:
@@ -245,6 +236,37 @@ def products():
     html += "</ul>"
     return render_template_string(html)
 
+@app.route("/webhook", methods=["POST"])
+def webhook():
+    try:
+        raw_body = request.get_data()
+        signature = request.headers.get("X-Salla-Signature")
+
+        if not signature:
+            logger.warning("❌ Webhook بدون توقيع")
+            return jsonify({"error": "Missing signature"}), 400
+
+        expected_signature = hmac.new(
+            WEBHOOK_SECRET.encode("utf-8"),
+            raw_body,
+            hashlib.sha256
+        ).hexdigest()
+
+        if not hmac.compare_digest(expected_signature, signature):
+            logger.warning("⚠️ توقيع غير صالح للويب هوك")
+            return jsonify({"error": "Invalid signature"}), 403
+
+        payload = request.json
+        event_type = payload.get("event", "unknown")
+
+        logger.info(f"📩 Webhook مستلم: {event_type}")
+        logger.debug(f"Payload: {json.dumps(payload, ensure_ascii=False)}")
+
+        return jsonify({"status": "success"}), 200
+
+    except Exception as e:
+        logger.error(f"❌ خطأ في معالجة Webhook: {str(e)}")
+        return jsonify({"error": "Internal Server Error"}), 500
 
 @app.route("/debug")
 def debug():
@@ -257,6 +279,10 @@ def debug():
         "redirect_uri": redirect_uri,
         "latest_token": token_data if token_data else "No token stored"
     })
+
+@app.route("/webhook-test")
+def webhook_test():
+    return "<h2>🚀 Webhook Test Route جاهز</h2>"
 
 # ----------------------
 if __name__ == "__main__":
